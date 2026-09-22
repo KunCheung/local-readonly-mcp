@@ -24,9 +24,11 @@ def test_reads_requested_line_range(tmp_path: Path) -> None:
     assert "102 | line-102" in result["content"]
     assert result["has_more"] is True
     assert result["next_start_line"] == 103
+    assert result["eof_reached"] is False
+    assert result["total_lines"] is None
 
 
-def test_end_of_file_has_no_next_start_line(tmp_path: Path) -> None:
+def test_end_of_file_reports_total_lines(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
     (root / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")
@@ -36,6 +38,29 @@ def test_end_of_file_has_no_next_start_line(tmp_path: Path) -> None:
     assert result["content"] == "1 | alpha\n2 | beta"
     assert result["has_more"] is False
     assert result["next_start_line"] is None
+    assert result["eof_reached"] is True
+    assert result["total_lines"] == 2
+    assert result["start_beyond_eof"] is False
+
+
+def test_start_line_beyond_eof_is_explicit(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    result = ReadOnlyWorkspace(root).read_text_file(
+        "a.txt",
+        start_line=100,
+        end_line=120,
+    )
+
+    assert result["content"] == ""
+    assert result["end_line"] is None
+    assert result["has_more"] is False
+    assert result["next_start_line"] is None
+    assert result["eof_reached"] is True
+    assert result["start_beyond_eof"] is True
+    assert result["total_lines"] == 2
 
 
 def test_output_budget_sets_next_start_line(tmp_path: Path) -> None:
