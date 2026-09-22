@@ -1,1 +1,406 @@
-# local-readonly-mcp\n\n一个面向 ChatGPT / Cursor / Claude Code / 其他 MCP Host 的**本地只读文件系统 MCP Server**。\n\n它只读取你在本地配置中明确允许的目录，不提供写入、编辑、删除、重命名、复制、创建目录或任意 Shell 执行能力。\n\n## 特性\n\n- 多个可配置只读根目录\n- `list_directory`：查看目录\n- `stat_path`：查看文件/目录元信息\n- `read_text_file`：按行范围读取文本\n- `search_files`：按文件名/Glob 搜索\n- `search_text`：递归搜索文本内容\n- `list_roots`：查看授权 root alias\n- `reload_config`：重新加载本地配置\n- 路径越界校验\n- Symlink / Junction 越界防护\n- 默认敏感文件过滤\n- UTF-8 / GB18030 / UTF-16 / UTF-32 BOM 文本支持\n- 大文件按行范围流式读取\n- 默认只允许 Streamable HTTP 绑定 loopback\n- 模型侧不暴露本机绝对目录\n- MCP Tool 标记 `read_only_hint=True`、`open_world_hint=False`\n\n## 1. 安装\n\n要求 Python 3.10+。\n\n```powershell\ngit clone https://github.com/KunCheung/local-readonly-mcp.git\ncd local-readonly-mcp\n.\\setup.ps1\n```\n\n`setup.ps1` 会：\n\n1. 创建 `.venv`\n2. 安装依赖\n3. 若本地没有 `config.json`，从 `config.example.json` 创建一份\n\n`config.json` 已加入 `.gitignore`，不会被默认提交到 Git。\n\n## 2. 配置可读目录\n\n修改本地 `config.json`：\n\n```json\n{\n  "default_root": "tmp",\n  "max_read_bytes": 2097152,\n  "max_search_file_bytes": 10485760,\n  "max_output_chars": 262144,\n  "allow_sensitive_files": false,\n  "deny_patterns": [],\n  "allow_patterns": [\n    ".env.example",\n    "**/.env.example"\n  ],\n  "roots": {\n    "tmp": "D:/tmp",\n    "project": "D:/Code/project"\n  }\n}\n```\n\n调用工具时通过 alias 选择目录：\n\n```text\nroot="project"\npath="src/main.py"\n```\n\n不传 `root` 时使用 `default_root`。\n\n修改配置后可以重启 MCP，也可以调用：\n\n```text\nreload_config\n```\n\n### 单个 root 单独配置\n\n```json\n{\n  "roots": {\n    "project": {\n      "path": "D:/Code/project",\n      "max_search_file_bytes": 52428800,\n      "deny_patterns": [\n        "**/secrets/**"\n      ]\n    }\n  }\n}\n```\n\n## 3. 敏感文件策略\n\n默认会拦截常见秘密文件，例如：\n\n```text\n.env\n.env.*\n*.pem\n*.key\nid_rsa\nid_ed25519\ncredentials.json\nservice-account*.json\n.ssh/\n.aws/\n.npmrc\n.pypirc\n.netrc\n```\n\n`.env.example` / `.env.sample` / `.env.template` 默认允许读取。\n\n如果某个 root 确实需要读取敏感文件，必须显式配置：\n\n```json\n{\n  "roots": {\n    "special": {\n      "path": "D:/special",\n      "allow_sensitive_files": true\n    }\n  }\n}\n```\n\n不建议对大范围目录开启该选项。\n\n## 4. 启动\n\n### stdio\n\n```powershell\n.\\.venv\\Scripts\\python.exe .\\server.py --config .\\config.json\n```\n\nMCP Host 配置示例：\n\n```json\n{\n  "mcpServers": {\n    "local-readonly": {\n      "command": "D:/path/to/local-readonly-mcp/.venv/Scripts/python.exe",\n      "args": [\n        "D:/path/to/local-readonly-mcp/server.py",\n        "--config",\n        "D:/path/to/local-readonly-mcp/config.json"\n      ]\n    }\n  }\n}\n```\n\n### Streamable HTTP\n\n```powershell\n.\\start_http.ps1\n```\n\n默认端点：\n\n```text\nhttp://127.0.0.1:8000/mcp\n```\n\n也可以：\n\n```powershell\n.\\.venv\\Scripts\\python.exe .\\server.py `\n  --config .\\config.json `\n  --transport streamable-http `\n  --host 127.0.0.1 `\n  --port 8000\n```\n\n为了避免误把本地文件 MCP 暴露到局域网，非 loopback 地址会被拒绝。\n\n只有明确理解风险并已配置认证/网络访问控制时才使用：\n\n```powershell\n--allow-remote\n```\n\n## 5. 大文件读取\n\n`read_text_file` 不再因为整个文件大于 2 MiB 就拒绝。\n\n例如可以直接读取大型日志中的一段：\n\n```text\nread_text_file(\n  root="logs",\n  path="application.log",\n  start_line=18000,\n  end_line=18100\n)\n```\n\n服务端会逐行扫描，只返回目标区间，不会把整个文件加载进内存。`max_read_bytes` 和 `max_output_chars` 限制的是单次返回内容，而不是整个文件大小。\n\n返回内容采用紧凑格式：\n\n```text\n18000 | ...\n18001 | ...\n18002 | ...\n```\n\n减少 MCP 返回值占用的模型上下文。\n\n## 6. 隐私边界\n\n模型只看到：\n\n```text\nroot="project"\npath="src/main.py"\n```\n\n不会通过 `list_roots` / `stat_path` 获得：\n\n```text\nD:/Code/project\nC:/Users/...\n```\n\n真实路径只存在于 MCP Server 本机进程中。\n\n> 这仍然是应用层访问控制。若需要更强隔离，建议让 MCP Server 使用一个对授权目录只有读取权限的独立 Windows 用户运行。\n\n## 7. 测试\n\n安装开发依赖：\n\n```powershell\n.\\.venv\\Scripts\\python.exe -m pip install -e ".[dev]"\n```\n\n运行：\n\n```powershell\npytest\n```\n\n项目包含 Windows GitHub Actions CI，覆盖 Python 3.10 和 3.12。\n\n测试重点包括：\n\n- `..` 路径穿越\n- 跨 root 访问\n- 绝对路径不泄露\n- 默认敏感文件拦截\n- `.env.example` 例外\n- UTF-16 文件\n- 大文件范围读取\n- loopback HTTP 保护\n\n## 8. 为什么没有 Shell\n\n即使把 Shell 标记成“只读”，重定向、子进程、命令参数以及某些工具本身仍可能产生副作用。\n\n因此本项目只提供目的明确的文件系统读取工具，不提供任意命令执行能力。\n\n## License\n\nMIT\n
+# local-readonly-mcp
+
+一个面向 ChatGPT、Cursor、Claude Code 等 MCP Host 的**薄型只读本地文件系统 MCP Server**。
+
+它只负责提供安全、受控、有界的文件读取与搜索能力。**文件选择、检索策略、调用顺序以及上下文管理由 MCP Host 负责。**
+
+```text
+ChatGPT / MCP Host
+├─ reasoning
+├─ planning
+├─ tool selection
+└─ context management
+        │
+        ▼
+local-readonly-mcp
+├─ list
+├─ stat
+├─ search
+└─ read
+        │
+        ▼
+Local Filesystem
+```
+
+## 设计原则
+
+- **Thin MCP**：不在 MCP 内实现 Agent、代码理解或任务规划
+- **Read only**：没有 write / edit / delete / rename / copy / mkdir / shell
+- **Explicit roots**：只能访问本地配置中明确允许的目录
+- **Bounded output**：每次工具调用的返回量都有上限
+- **Host-controlled continuation**：MCP 返回 `has_more` 和下一位置，由 ChatGPT 决定是否继续调用
+- **No cursor pagination**：目录和搜索统一使用直观的 `offset / limit`
+- **Private paths**：模型只看到 root alias 和相对路径，不看到本机绝对目录
+- **Secret filtering**：默认阻止常见密钥和凭证文件
+- **Local HTTP by default**：Streamable HTTP 默认只允许 loopback
+
+## MCP Tools
+
+核心读取接口：
+
+```text
+list_roots()
+
+list_directory(
+    root=None,
+    path="",
+    recursive=False,
+    max_depth=2,
+    offset=0,
+    limit=100
+)
+
+stat_path(
+    path,
+    root=None
+)
+
+read_text_file(
+    path,
+    root=None,
+    start_line=1,
+    end_line=300
+)
+
+search_files(
+    pattern,
+    root=None,
+    path="",
+    offset=0,
+    limit=100
+)
+
+search_text(
+    query,
+    root=None,
+    path="",
+    file_glob="*",
+    offset=0,
+    limit=50
+)
+```
+
+另有管理接口：
+
+```text
+reload_config()
+```
+
+## 分页与续读
+
+目录和搜索统一使用 `offset / limit`，不使用 cursor。
+
+例如：
+
+```text
+search_text(
+    query="OpenAI",
+    offset=0,
+    limit=50
+)
+```
+
+返回：
+
+```json
+{
+  "offset": 0,
+  "limit": 50,
+  "returned": 50,
+  "has_more": true,
+  "next_offset": 50,
+  "results": []
+}
+```
+
+如果 ChatGPT 需要更多结果，再调用：
+
+```text
+search_text(
+    query="OpenAI",
+    offset=50,
+    limit=50
+)
+```
+
+文件读取使用行号，不使用 offset：
+
+```text
+read_text_file(
+    path="src/main.py",
+    start_line=1,
+    end_line=300
+)
+```
+
+如果仍有内容，返回：
+
+```json
+{
+  "start_line": 1,
+  "end_line": 300,
+  "has_more": true,
+  "next_start_line": 301,
+  "content": "..."
+}
+```
+
+是否继续读取由 MCP Host 决定。
+
+## 上下文控制
+
+这个 MCP 不尝试获取或管理 ChatGPT 的剩余上下文长度。
+
+它只保证**单次工具返回有界**，避免一次调用把整个项目或大量文件内容塞入模型上下文。
+
+默认：
+
+```json
+{
+  "max_output_chars": 65536
+}
+```
+
+另外各工具有默认数量限制：
+
+```text
+list_directory   limit=100
+search_files     limit=100
+search_text      limit=50
+read_text_file   1-300 行
+```
+
+文件始终保留在本地。如果模型后续需要某段内容，可以再次调用 MCP 读取，而不是依赖此前把整个项目放进对话上下文。
+
+## 安装
+
+要求 Python 3.10+。
+
+```powershell
+git clone https://github.com/KunCheung/local-readonly-mcp.git
+cd local-readonly-mcp
+.\setup.ps1
+```
+
+`setup.ps1` 会创建虚拟环境、安装依赖，并在本地不存在 `config.json` 时从 `config.example.json` 创建一份。
+
+`config.json` 已加入 `.gitignore`，不会被默认提交到 Git。
+
+## 配置可读目录
+
+修改本地 `config.json`：
+
+```json
+{
+  "default_root": "tmp",
+  "max_read_bytes": 2097152,
+  "max_search_file_bytes": 10485760,
+  "max_output_chars": 65536,
+  "allow_sensitive_files": false,
+  "deny_patterns": [],
+  "allow_patterns": [
+    ".env.example",
+    "**/.env.example"
+  ],
+  "roots": {
+    "tmp": "D:/tmp",
+    "project": "D:/Code/project"
+  }
+}
+```
+
+调用时使用 alias，而不是绝对路径：
+
+```text
+root="project"
+path="src/main.py"
+```
+
+不传 `root` 时使用 `default_root`。
+
+修改配置后可以重启 MCP，或者调用：
+
+```text
+reload_config()
+```
+
+### 单个 root 单独配置
+
+```json
+{
+  "roots": {
+    "project": {
+      "path": "D:/Code/project",
+      "max_search_file_bytes": 52428800,
+      "deny_patterns": [
+        "**/secrets/**"
+      ]
+    }
+  }
+}
+```
+
+## 敏感文件策略
+
+默认阻止常见秘密文件，例如：
+
+```text
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+credentials.json
+service-account*.json
+.ssh/
+.aws/
+.npmrc
+.pypirc
+.netrc
+```
+
+以下模板文件默认允许：
+
+```text
+.env.example
+.env.sample
+.env.template
+```
+
+如果某个 root 确实需要读取敏感文件，可以显式设置：
+
+```json
+{
+  "roots": {
+    "special": {
+      "path": "D:/special",
+      "allow_sensitive_files": true
+    }
+  }
+}
+```
+
+不建议对大范围目录开启该选项。
+
+## 启动
+
+### stdio
+
+```powershell
+.\.venv\Scripts\python.exe .\server.py --config .\config.json
+```
+
+MCP Host 配置示例：
+
+```json
+{
+  "mcpServers": {
+    "local-readonly": {
+      "command": "D:/path/to/local-readonly-mcp/.venv/Scripts/python.exe",
+      "args": [
+        "D:/path/to/local-readonly-mcp/server.py",
+        "--config",
+        "D:/path/to/local-readonly-mcp/config.json"
+      ]
+    }
+  }
+}
+```
+
+### Streamable HTTP
+
+```powershell
+.\start_http.ps1
+```
+
+默认端点：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+默认拒绝绑定 `0.0.0.0` 或局域网 IP。只有明确配置了认证和网络访问控制时才使用：
+
+```text
+--allow-remote
+```
+
+## 文件与编码
+
+`read_text_file` 按行范围读取，并限制单次返回量。底层支持：
+
+```text
+UTF-8
+UTF-8 BOM
+GB18030
+UTF-16 BOM
+UTF-32 BOM
+```
+
+读取结果使用紧凑行号格式：
+
+```text
+120 | ...
+121 | ...
+122 | ...
+```
+
+## 隐私边界
+
+模型看到的是：
+
+```text
+root="project"
+path="src/main.py"
+```
+
+不会通过 MCP 工具得到：
+
+```text
+D:/Code/project
+C:/Users/...
+```
+
+真实路径只存在于本机 MCP Server 进程中。
+
+> 这是应用层访问控制。如果需要更强隔离，建议让 MCP Server 使用一个对授权目录只有读取权限的独立 Windows 用户运行。
+
+## 测试
+
+安装开发依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+运行：
+
+```powershell
+pytest
+```
+
+GitHub Actions 在 Windows 上测试 Python 3.10 和 3.12。
+
+覆盖重点包括：
+
+- 路径穿越与跨 root 访问
+- 敏感文件过滤
+- 绝对路径隐藏
+- UTF-16 文本
+- `offset / limit` 分页
+- 分页连续性、无重复
+- `has_more / next_offset`
+- `has_more / next_start_line`
+- 单次输出上限
+- loopback HTTP 保护
+
+## 为什么没有 Shell
+
+即使把 Shell 描述成“只读”，重定向、子进程、命令参数以及某些工具本身仍可能产生副作用。
+
+因此项目只提供目的明确的文件系统读取能力，不提供任意命令执行。
+
+## License
+
+MIT
