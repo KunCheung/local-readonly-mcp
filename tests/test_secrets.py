@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 
 import pytest
 
+from config import WorkspaceRegistry
 from filesystem import ReadOnlyWorkspace, WorkspaceError
 
 
@@ -40,6 +42,34 @@ def test_env_example_is_allowed(tmp_path: Path) -> None:
     result = workspace.read_text_file(".env.example")
 
     assert "API_KEY=example" in result["content"]
+
+
+def test_fine_grained_allow_pattern_keeps_other_defaults_blocked(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / ".env").write_text("A=B", encoding="utf-8")
+    (root / "private.pem").write_text("secret", encoding="utf-8")
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "roots": {
+                    "work": {
+                        "path": str(root),
+                        "allow_patterns": [".env", "*/.env"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    workspace = WorkspaceRegistry(config_path).get("work")[1]
+
+    assert "A=B" in workspace.read_text_file(".env")["content"]
+    with pytest.raises(WorkspaceError):
+        workspace.read_text_file("private.pem")
 
 
 def test_sensitive_filter_can_be_explicitly_disabled(tmp_path: Path) -> None:
