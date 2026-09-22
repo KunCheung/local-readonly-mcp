@@ -5,14 +5,7 @@
   "max_output_chars": 65536,
   "allow_sensitive_files": false,
   "deny_patterns": [],
-  "allow_patterns": [
-    ".env.example",
-    "**/.env.example",
-    ".env.sample",
-    "**/.env.sample",
-    ".env.template",
-    "**/.env.template"
-  ],
+  "allow_patterns": [],
   "roots": {
     "tmp": "D:/tmp"
   }
