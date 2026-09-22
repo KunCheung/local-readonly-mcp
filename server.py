@@ -25,9 +25,10 @@ def build_server(registry: WorkspaceRegistry) -> MCPServer:
     mcp = MCPServer(
         "local-readonly-files",
         instructions=(
-            "Read-only access to explicitly configured local filesystem roots. "
-            "Use root aliases and relative paths only. The server intentionally "
-            "does not expose absolute local paths, write/edit/delete operations, "
+            "Thin read-only filesystem capabilities for an MCP host. "
+            "The host decides which tools to call, in what order, and whether to continue "
+            "pagination or line-range reads. Use root aliases and relative paths only. "
+            "The server does not expose absolute local paths, filesystem mutation tools, "
             "or arbitrary command execution."
         ),
     )
@@ -49,16 +50,18 @@ def build_server(registry: WorkspaceRegistry) -> MCPServer:
         path: str = "",
         recursive: bool = False,
         max_depth: int = 2,
-        max_entries: int = 200,
+        offset: int = 0,
+        limit: int = 100,
         include_hidden: bool = False,
     ) -> dict[str, Any]:
-        """List files and directories below one configured root alias."""
+        """List a bounded page of files/directories below one configured root alias."""
         alias, workspace = registry.get(root)
         result = workspace.list_directory(
             path,
             recursive=recursive,
             max_depth=max_depth,
-            max_entries=max_entries,
+            offset=offset,
+            limit=limit,
             include_hidden=include_hidden,
         )
         result["root"] = alias
@@ -77,15 +80,10 @@ def build_server(registry: WorkspaceRegistry) -> MCPServer:
         path: str,
         root: str | None = None,
         start_line: int = 1,
-        end_line: int = 400,
+        end_line: int = 300,
         encoding: str = "auto",
     ) -> dict[str, Any]:
-        """
-        Read a bounded text-file range.
-
-        The file may be larger than the direct-read size limit because line ranges
-        are streamed instead of loading the whole file into memory.
-        """
+        """Read a bounded text line range and return next_start_line when more is available."""
         alias, workspace = registry.get(root)
         result = workspace.read_text_file(
             path,
@@ -101,15 +99,17 @@ def build_server(registry: WorkspaceRegistry) -> MCPServer:
         pattern: str,
         root: str | None = None,
         path: str = "",
-        max_results: int = 100,
+        offset: int = 0,
+        limit: int = 100,
         include_hidden: bool = False,
     ) -> dict[str, Any]:
-        """Recursively find files by glob pattern inside one configured root."""
+        """Return a bounded page of files matching a glob pattern."""
         alias, workspace = registry.get(root)
         result = workspace.search_files(
             pattern,
             path=path,
-            max_results=max_results,
+            offset=offset,
+            limit=limit,
             include_hidden=include_hidden,
         )
         result["root"] = alias
@@ -122,17 +122,19 @@ def build_server(registry: WorkspaceRegistry) -> MCPServer:
         path: str = "",
         file_glob: str = "*",
         case_sensitive: bool = False,
-        max_results: int = 100,
+        offset: int = 0,
+        limit: int = 50,
         include_hidden: bool = False,
     ) -> dict[str, Any]:
-        """Search literal text recursively and return matching relative paths and lines."""
+        """Return a bounded page of literal text matches."""
         alias, workspace = registry.get(root)
         result = workspace.search_text(
             query,
             path=path,
             file_glob=file_glob,
             case_sensitive=case_sensitive,
-            max_results=max_results,
+            offset=offset,
+            limit=limit,
             include_hidden=include_hidden,
         )
         result["root"] = alias
