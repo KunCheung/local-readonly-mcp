@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-readonly-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "A thin, configurable, read-only local filesystem MCP server with bounded output and secret filtering."
 readme = "README.md"
 requires-python = ">=3.10"
