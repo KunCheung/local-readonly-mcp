@@ -8,6 +8,11 @@ from config import WorkspaceRegistry
 from server import build_server
 
 
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
 @pytest.mark.anyio
 async def test_workspace_error_becomes_tool_error_result(tmp_path: Path) -> None:
     root = tmp_path / "root"
