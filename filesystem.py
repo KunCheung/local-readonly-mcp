@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 DEFAULT_MAX_READ_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_SEARCH_FILE_BYTES = 10 * 1024 * 1024
-DEFAULT_MAX_OUTPUT_CHARS = 256 * 1024
+DEFAULT_MAX_OUTPUT_CHARS = 64 * 1024
 
 SKIP_DIR_NAMES = {
     ".git",
@@ -182,9 +182,7 @@ class ReadOnlyWorkspace:
 
             child = current / name
             if child.is_symlink() or self._is_junction(child):
-                resolved = self._safe_child(child)
-                if resolved is None:
-                    continue
+                # Never recurse through links/junctions, even if their target is in-root.
                 continue
 
             if self._safe_child(child) is None:
@@ -192,7 +190,7 @@ class ReadOnlyWorkspace:
 
             safe.append(name)
 
-        return safe
+        return sorted(safe, key=str.casefold)
 
     def iter_files(
         self,
@@ -200,6 +198,7 @@ class ReadOnlyWorkspace:
         *,
         include_hidden: bool = False,
     ) -> Iterator[Path]:
+        """Yield files in a deterministic order for stable offset pagination."""
         if base.is_file():
             yield base
             return
@@ -212,7 +211,7 @@ class ReadOnlyWorkspace:
                 include_hidden=include_hidden,
             )
 
-            for name in files:
+            for name in sorted(files, key=str.casefold):
                 if not include_hidden and name.startswith("."):
                     continue
                 resolved = self._safe_child(current / name)
@@ -265,6 +264,10 @@ class ReadOnlyWorkspace:
         except (LookupError, UnicodeError) as exc:
             raise WorkspaceError("Unable to open text file with selected encoding") from exc
 
+    @staticmethod
+    def _normalize_page(offset: int, limit: int, *, max_limit: int = 1000) -> tuple[int, int]:
+        return max(0, int(offset)), max(1, min(int(limit), max_limit))
+
     def stat(self, path: str) -> dict[str, Any]:
         target = self.resolve(path)
         stat = target.stat()
@@ -275,13 +278,60 @@ class ReadOnlyWorkspace:
             "modified_time_unix": stat.st_mtime,
         }
 
+    def _iter_directory_entries(
+        self,
+        target: Path,
+        *,
+        recursive: bool,
+        max_depth: int,
+        include_hidden: bool,
+    ) -> Iterator[Path]:
+        if not recursive:
+            children = sorted(
+                target.iterdir(),
+                key=lambda p: (not p.is_dir(), p.name.casefold()),
+            )
+            for child in children:
+                if not include_hidden and child.name.startswith("."):
+                    continue
+                if self._safe_child(child) is not None:
+                    yield child
+            return
+
+        base_depth = len(target.parts)
+        for current_str, dirs, files in os.walk(target, followlinks=False):
+            current = Path(current_str)
+            depth = len(current.parts) - base_depth
+            dirs[:] = self._safe_dirs(
+                current,
+                dirs,
+                include_hidden=include_hidden,
+            )
+
+            visible_dirs = list(dirs)
+            if depth >= max_depth:
+                dirs[:] = []
+                visible_dirs = []
+
+            names = sorted(
+                [*visible_dirs, *files],
+                key=str.casefold,
+            )
+            for name in names:
+                if not include_hidden and name.startswith("."):
+                    continue
+                child = current / name
+                if self._safe_child(child) is not None:
+                    yield child
+
     def list_directory(
         self,
         path: str = "",
         *,
         recursive: bool = False,
         max_depth: int = 2,
-        max_entries: int = 200,
+        offset: int = 0,
+        limit: int = 100,
         include_hidden: bool = False,
     ) -> dict[str, Any]:
         target = self.resolve(path)
@@ -289,78 +339,55 @@ class ReadOnlyWorkspace:
             raise WorkspaceError("Not a directory")
 
         max_depth = max(0, min(int(max_depth), 10))
-        max_entries = max(1, min(int(max_entries), 2000))
+        offset, limit = self._normalize_page(offset, limit)
         entries: list[dict[str, Any]] = []
-        truncated = False
+        matched = 0
+        output_chars = 0
+        has_more = False
 
-        def append_entry(path_obj: Path) -> bool:
-            nonlocal truncated
-            if len(entries) >= max_entries:
-                truncated = True
-                return False
+        try:
+            iterator = self._iter_directory_entries(
+                target,
+                recursive=recursive,
+                max_depth=max_depth,
+                include_hidden=include_hidden,
+            )
+            for path_obj in iterator:
+                resolved = self._safe_child(path_obj)
+                if resolved is None:
+                    continue
 
-            resolved = self._safe_child(path_obj)
-            if resolved is None:
-                return True
+                if matched < offset:
+                    matched += 1
+                    continue
 
-            try:
                 stat = resolved.stat()
-            except OSError:
-                return True
-
-            entries.append(
-                {
+                entry = {
                     "path": self.relative(resolved),
                     "name": path_obj.name,
                     "type": "directory" if resolved.is_dir() else "file",
                     "size_bytes": stat.st_size if resolved.is_file() else None,
                 }
-            )
-            return True
+                cost = len(entry["path"]) + len(entry["name"]) + 64
 
-        if not recursive:
-            try:
-                children = sorted(
-                    target.iterdir(),
-                    key=lambda p: (not p.is_dir(), p.name.casefold()),
-                )
-            except OSError as exc:
-                raise WorkspaceError("Unable to list directory") from exc
-
-            for child in children:
-                if not include_hidden and child.name.startswith("."):
-                    continue
-                if not append_entry(child):
-                    break
-        else:
-            base_depth = len(target.parts)
-            for current_str, dirs, files in os.walk(target, followlinks=False):
-                current = Path(current_str)
-                depth = len(current.parts) - base_depth
-                dirs[:] = self._safe_dirs(
-                    current,
-                    dirs,
-                    include_hidden=include_hidden,
-                )
-
-                visible_dirs = list(dirs)
-                if depth >= max_depth:
-                    dirs[:] = []
-                    visible_dirs = []
-
-                for name in sorted([*visible_dirs, *files], key=str.casefold):
-                    if not include_hidden and name.startswith("."):
-                        continue
-                    if not append_entry(current / name):
-                        break
-
-                if truncated:
+                if len(entries) >= limit or (entries and output_chars + cost > self.max_output_chars):
+                    has_more = True
                     break
 
+                entries.append(entry)
+                output_chars += cost
+                matched += 1
+        except OSError as exc:
+            raise WorkspaceError("Unable to list directory") from exc
+
+        returned = len(entries)
         return {
             "directory": self.relative(target),
-            "count": len(entries),
-            "truncated": truncated,
+            "offset": offset,
+            "limit": limit,
+            "returned": returned,
+            "has_more": has_more,
+            "next_offset": offset + returned if has_more else None,
             "entries": entries,
         }
 
@@ -369,7 +396,7 @@ class ReadOnlyWorkspace:
         path: str,
         *,
         start_line: int = 1,
-        end_line: int = 400,
+        end_line: int = 300,
         encoding: str = "auto",
     ) -> dict[str, Any]:
         """Read a bounded line range without loading the whole file into memory."""
@@ -390,7 +417,7 @@ class ReadOnlyWorkspace:
         output_chars = 0
         output_bytes = 0
         last_line = start - 1
-        more_lines_exist = False
+        has_more = False
 
         try:
             with stream:
@@ -398,7 +425,7 @@ class ReadOnlyWorkspace:
                     if line_number < start:
                         continue
                     if line_number > end:
-                        more_lines_exist = True
+                        has_more = True
                         break
 
                     line = raw_line.rstrip("\r\n")
@@ -409,7 +436,7 @@ class ReadOnlyWorkspace:
                         output_chars + rendered_chars > self.max_output_chars
                         or output_bytes + rendered_bytes > self.max_read_bytes
                     ):
-                        more_lines_exist = True
+                        has_more = True
                         break
 
                     output.append(rendered)
@@ -421,13 +448,18 @@ class ReadOnlyWorkspace:
                 f"Unable to decode file using encoding={used_encoding!r}"
             ) from exc
 
+        if requested_end > end:
+            has_more = True
+
+        next_start_line = last_line + 1 if has_more else None
         return {
             "path": self.relative(target),
             "encoding": used_encoding,
             "size_bytes": target.stat().st_size,
             "start_line": start,
             "end_line": last_line,
-            "truncated": more_lines_exist or requested_end > end,
+            "has_more": has_more,
+            "next_start_line": next_start_line,
             "content": "\n".join(output),
         }
 
@@ -436,40 +468,55 @@ class ReadOnlyWorkspace:
         pattern: str,
         *,
         path: str = "",
-        max_results: int = 100,
+        offset: int = 0,
+        limit: int = 100,
         include_hidden: bool = False,
     ) -> dict[str, Any]:
         base = self.resolve(path)
         if not base.is_dir():
             raise WorkspaceError("Not a directory")
 
-        limit = max(1, min(int(max_results), 1000))
+        offset, limit = self._normalize_page(offset, limit)
         needle = pattern.casefold()
         results: list[dict[str, Any]] = []
+        matched = 0
+        output_chars = 0
+        has_more = False
 
         for file_path in self.iter_files(base, include_hidden=include_hidden):
             relative = self.relative(file_path)
-            if fnmatch.fnmatch(file_path.name.casefold(), needle) or fnmatch.fnmatch(
-                relative.casefold(), needle
+            if not (
+                fnmatch.fnmatch(file_path.name.casefold(), needle)
+                or fnmatch.fnmatch(relative.casefold(), needle)
             ):
-                results.append(
-                    {
-                        "path": relative,
-                        "size_bytes": file_path.stat().st_size,
-                    }
-                )
-                if len(results) >= limit:
-                    return {
-                        "pattern": pattern,
-                        "count": len(results),
-                        "truncated": True,
-                        "results": results,
-                    }
+                continue
 
+            if matched < offset:
+                matched += 1
+                continue
+
+            result = {
+                "path": relative,
+                "size_bytes": file_path.stat().st_size,
+            }
+            cost = len(relative) + 48
+            if len(results) >= limit or (results and output_chars + cost > self.max_output_chars):
+                has_more = True
+                break
+
+            results.append(result)
+            output_chars += cost
+            matched += 1
+
+        returned = len(results)
         return {
+            "path": self.relative(base),
             "pattern": pattern,
-            "count": len(results),
-            "truncated": False,
+            "offset": offset,
+            "limit": limit,
+            "returned": returned,
+            "has_more": has_more,
+            "next_offset": offset + returned if has_more else None,
             "results": results,
         }
 
@@ -480,16 +527,20 @@ class ReadOnlyWorkspace:
         path: str = "",
         file_glob: str = "*",
         case_sensitive: bool = False,
-        max_results: int = 100,
+        offset: int = 0,
+        limit: int = 50,
         include_hidden: bool = False,
     ) -> dict[str, Any]:
         if not query:
             raise WorkspaceError("query must not be empty")
 
         base = self.resolve(path)
-        limit = max(1, min(int(max_results), 1000))
+        offset, limit = self._normalize_page(offset, limit)
         needle = query if case_sensitive else query.casefold()
         results: list[dict[str, Any]] = []
+        matched = 0
+        output_chars = 0
+        has_more = False
         skipped_binary = 0
         skipped_large = 0
         skipped_decode = 0
@@ -515,26 +566,33 @@ class ReadOnlyWorkspace:
                         for line_number, raw_line in enumerate(stream, start=1):
                             line = raw_line.rstrip("\r\n")
                             haystack = line if case_sensitive else line.casefold()
-                            if needle in haystack:
-                                results.append(
-                                    {
-                                        "path": self.relative(file_path),
-                                        "line": line_number,
-                                        "text": line[:2000],
-                                        "encoding": used_encoding,
-                                    }
-                                )
-                                if len(results) >= limit:
-                                    return {
-                                        "query": query,
-                                        "file_glob": file_glob,
-                                        "count": len(results),
-                                        "truncated": True,
-                                        "skipped_binary": skipped_binary,
-                                        "skipped_large": skipped_large,
-                                        "skipped_decode": skipped_decode,
-                                        "results": results,
-                                    }
+                            if needle not in haystack:
+                                continue
+
+                            if matched < offset:
+                                matched += 1
+                                continue
+
+                            relative = self.relative(file_path)
+                            result = {
+                                "path": relative,
+                                "line": line_number,
+                                "text": line[:2000],
+                                "encoding": used_encoding,
+                            }
+                            cost = len(relative) + len(result["text"]) + 96
+                            if len(results) >= limit or (
+                                results and output_chars + cost > self.max_output_chars
+                            ):
+                                has_more = True
+                                break
+
+                            results.append(result)
+                            output_chars += cost
+                            matched += 1
+
+                        if has_more:
+                            break
                 except UnicodeDecodeError:
                     skipped_decode += 1
                     continue
@@ -542,11 +600,16 @@ class ReadOnlyWorkspace:
             except (OSError, PermissionError):
                 continue
 
+        returned = len(results)
         return {
+            "path": self.relative(base),
             "query": query,
             "file_glob": file_glob,
-            "count": len(results),
-            "truncated": False,
+            "offset": offset,
+            "limit": limit,
+            "returned": returned,
+            "has_more": has_more,
+            "next_offset": offset + returned if has_more else None,
             "skipped_binary": skipped_binary,
             "skipped_large": skipped_large,
             "skipped_decode": skipped_decode,
