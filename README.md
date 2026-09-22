@@ -28,15 +28,14 @@ Local Filesystem
 - **Read only**：没有 write / edit / delete / rename / copy / mkdir / shell
 - **Explicit roots**：只能访问本地配置中明确允许的目录
 - **Bounded output**：每次工具调用的返回量都有上限
-- **Host-controlled continuation**：MCP 返回 `has_more` 和下一位置，由 ChatGPT 决定是否继续调用
-- **No cursor pagination**：目录和搜索统一使用直观的 `offset / limit`
+- **Host-controlled continuation**：MCP 返回 `has_more` 和下一位置，由 MCP Host 决定是否继续
+- **Offset pagination**：目录和搜索使用直观的 `offset / limit`
 - **Private paths**：模型只看到 root alias 和相对路径，不看到本机绝对目录
 - **Secret filtering**：默认阻止常见密钥和凭证文件
+- **No recursive link traversal**：递归 list/search 不进入 symlink/junction
 - **Local HTTP by default**：Streamable HTTP 默认只允许 loopback
 
 ## MCP Tools
-
-核心读取接口：
 
 ```text
 list_roots()
@@ -78,19 +77,13 @@ search_text(
     offset=0,
     limit=50
 )
-```
 
-另有管理接口：
-
-```text
 reload_config()
 ```
 
 ## 分页与续读
 
-目录和搜索统一使用 `offset / limit`，不使用 cursor。
-
-例如：
+目录和搜索统一使用 `offset / limit`：
 
 ```text
 search_text(
@@ -113,17 +106,9 @@ search_text(
 }
 ```
 
-如果 ChatGPT 需要更多结果，再调用：
+如果 Host 还需要结果，再从 `next_offset` 继续。
 
-```text
-search_text(
-    query="OpenAI",
-    offset=50,
-    limit=50
-)
-```
-
-文件读取使用行号，不使用 offset：
+文件读取使用行号：
 
 ```text
 read_text_file(
@@ -133,7 +118,7 @@ read_text_file(
 )
 ```
 
-如果仍有内容，返回：
+如果后面还有内容：
 
 ```json
 {
@@ -145,13 +130,26 @@ read_text_file(
 }
 ```
 
-是否继续读取由 MCP Host 决定。
+如果请求起始行已经超过 EOF：
+
+```json
+{
+  "start_line": 1000,
+  "end_line": null,
+  "has_more": false,
+  "next_start_line": null,
+  "eof_reached": true,
+  "start_beyond_eof": true,
+  "total_lines": 123,
+  "content": ""
+}
+```
+
+当本次读取实际到达 EOF 时会返回 `total_lines`；未扫描到 EOF 时该字段为 `null`。
 
 ## 上下文控制
 
-这个 MCP 不尝试获取或管理 ChatGPT 的剩余上下文长度。
-
-它只保证**单次工具返回有界**，避免一次调用把整个项目或大量文件内容塞入模型上下文。
+这个 MCP 不尝试获取或管理 ChatGPT 的剩余上下文长度。它只保证**单次工具返回有界**。
 
 默认：
 
@@ -161,7 +159,7 @@ read_text_file(
 }
 ```
 
-另外各工具有默认数量限制：
+各工具默认：
 
 ```text
 list_directory   limit=100
@@ -170,11 +168,20 @@ search_text      limit=50
 read_text_file   1-300 行
 ```
 
-文件始终保留在本地。如果模型后续需要某段内容，可以再次调用 MCP 读取，而不是依赖此前把整个项目放进对话上下文。
+文件始终保留在本地。模型需要时可以再次调用 MCP，而不是把整个项目一次性复制进对话上下文。
 
 ## 安装
 
-要求 Python 3.10+。
+要求：
+
+```text
+Python >= 3.10
+mcp[cli] >= 2.0, < 3
+```
+
+本项目使用 MCP Python SDK v2 的 `MCPServer` API。安装旧版 MCP SDK 会导致导入或运行失败。
+
+### Windows PowerShell
 
 ```powershell
 git clone https://github.com/KunCheung/local-readonly-mcp.git
@@ -182,34 +189,49 @@ cd local-readonly-mcp
 .\setup.ps1
 ```
 
-`setup.ps1` 会创建虚拟环境、安装依赖，并在本地不存在 `config.json` 时从 `config.example.json` 创建一份。
+### macOS / Linux
 
-`config.json` 已加入 `.gitignore`，不会被默认提交到 Git。
+```bash
+git clone https://github.com/KunCheung/local-readonly-mcp.git
+cd local-readonly-mcp
+bash ./setup.sh
+```
+
+安装脚本会创建虚拟环境、安装依赖，并在本地不存在 `config.json` 时从 `config.example.json` 创建一份。
+
+`config.json` 已加入 `.gitignore`。
 
 ## 配置可读目录
 
-修改本地 `config.json`：
+Windows 示例：
 
 ```json
 {
-  "default_root": "tmp",
+  "default_root": "project",
   "max_read_bytes": 2097152,
   "max_search_file_bytes": 10485760,
   "max_output_chars": 65536,
   "allow_sensitive_files": false,
   "deny_patterns": [],
-  "allow_patterns": [
-    ".env.example",
-    "**/.env.example"
-  ],
+  "allow_patterns": [],
   "roots": {
-    "tmp": "D:/tmp",
     "project": "D:/Code/project"
   }
 }
 ```
 
-调用时使用 alias，而不是绝对路径：
+macOS / Linux 示例：
+
+```json
+{
+  "default_root": "project",
+  "roots": {
+    "project": "/home/user/code/project"
+  }
+}
+```
+
+调用工具时使用 alias：
 
 ```text
 root="project"
@@ -224,25 +246,9 @@ path="src/main.py"
 reload_config()
 ```
 
-### 单个 root 单独配置
-
-```json
-{
-  "roots": {
-    "project": {
-      "path": "D:/Code/project",
-      "max_search_file_bytes": 52428800,
-      "deny_patterns": [
-        "**/secrets/**"
-      ]
-    }
-  }
-}
-```
-
 ## 敏感文件策略
 
-默认阻止常见秘密文件，例如：
+默认阻止：
 
 ```text
 .env
@@ -268,7 +274,33 @@ service-account*.json
 .env.template
 ```
 
-如果某个 root 确实需要读取敏感文件，可以显式设置：
+### 推荐：精确放行
+
+如果只需要读取某一种默认敏感文件，优先使用 `allow_patterns`，不要关闭整套过滤。
+
+例如仅允许读取 `.env`：
+
+```json
+{
+  "roots": {
+    "project": {
+      "path": "D:/Code/project",
+      "allow_patterns": [
+        ".env",
+        "*/.env"
+      ]
+    }
+  }
+}
+```
+
+`allow_patterns` 是**追加式**的：root 级配置会叠加全局配置和内置的 `.env.example/.sample/.template` 例外。
+
+这种配置只会放行匹配的 `.env`，`*.pem`、`id_rsa`、`credentials.json` 等仍然保持阻止。
+
+### 全量关闭默认敏感文件过滤
+
+仅在确实需要时：
 
 ```json
 {
@@ -281,46 +313,73 @@ service-account*.json
 }
 ```
 
-不建议对大范围目录开启该选项。
+`allow_sensitive_files=true` 会关闭该 root 的**整套内置 deny patterns**，只保留你显式配置的 `deny_patterns`。不建议对大范围目录开启。
+
+## Symlink / Junction 策略
+
+递归目录遍历和搜索采用保守策略：
+
+> **永远不进入 symlink / junction / Windows reparse-point 目录，即使目标仍位于授权 root 内。**
+
+这是有意的安全边界，不是“校验通过后继续递归”。
+
+因此：
+
+- `list_directory(recursive=true)`
+- `search_files`
+- `search_text`
+
+都会在结果中返回：
+
+```json
+{
+  "skipped_links": 1
+}
+```
+
+表示本次调用因链接边界跳过了多少条目，提醒 Host 搜索结果可能不是物理文件树的完整展开。
+
+显式读取一个路径时仍会执行 `resolve(strict=True)` 和 root 边界检查：解析后越过 root 的路径会被拒绝。
+
+Windows junction/reparse-point 检测兼容 Python 3.10/3.11，不依赖只有 Python 3.12+ 才提供的 `Path.is_junction()`。
 
 ## 启动
 
 ### stdio
 
+Windows：
+
 ```powershell
 .\.venv\Scripts\python.exe .\server.py --config .\config.json
 ```
 
-MCP Host 配置示例：
+macOS / Linux：
 
-```json
-{
-  "mcpServers": {
-    "local-readonly": {
-      "command": "D:/path/to/local-readonly-mcp/.venv/Scripts/python.exe",
-      "args": [
-        "D:/path/to/local-readonly-mcp/server.py",
-        "--config",
-        "D:/path/to/local-readonly-mcp/config.json"
-      ]
-    }
-  }
-}
+```bash
+./.venv/bin/python ./server.py --config ./config.json
 ```
 
 ### Streamable HTTP
+
+Windows：
 
 ```powershell
 .\start_http.ps1
 ```
 
-默认端点：
+macOS / Linux：
+
+```bash
+bash ./start_http.sh
+```
+
+默认：
 
 ```text
 http://127.0.0.1:8000/mcp
 ```
 
-默认拒绝绑定 `0.0.0.0` 或局域网 IP。只有明确配置了认证和网络访问控制时才使用：
+默认拒绝绑定 `0.0.0.0` 或局域网 IP。只有明确配置认证和网络访问控制时才使用：
 
 ```text
 --allow-remote
@@ -328,7 +387,7 @@ http://127.0.0.1:8000/mcp
 
 ## 文件与编码
 
-`read_text_file` 按行范围读取，并限制单次返回量。底层支持：
+`read_text_file` 支持：
 
 ```text
 UTF-8
@@ -348,7 +407,7 @@ UTF-32 BOM
 
 ## 隐私边界
 
-模型看到的是：
+模型看到：
 
 ```text
 root="project"
@@ -364,36 +423,36 @@ C:/Users/...
 
 真实路径只存在于本机 MCP Server 进程中。
 
-> 这是应用层访问控制。如果需要更强隔离，建议让 MCP Server 使用一个对授权目录只有读取权限的独立 Windows 用户运行。
+> 这是应用层访问控制。如果需要更强隔离，建议让 MCP Server 使用一个对授权目录只有读取权限的独立 OS 用户运行。
 
 ## 测试
 
-安装开发依赖：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest
 ```
 
-运行：
+GitHub Actions 覆盖：
 
-```powershell
-pytest
+```text
+Windows / Ubuntu / macOS
+Python 3.10 / 3.12
 ```
 
-GitHub Actions 在 Windows 上测试 Python 3.10 和 3.12。
-
-覆盖重点包括：
+测试包括：
 
 - 路径穿越与跨 root 访问
-- 敏感文件过滤
+- 默认敏感文件过滤
+- 精确 `allow_patterns` 放行
 - 绝对路径隐藏
 - UTF-16 文本
 - `offset / limit` 分页
-- 分页连续性、无重复
-- `has_more / next_offset`
-- `has_more / next_start_line`
+- EOF / 行号越界语义
+- symlink 跳过与 `skipped_links`
+- Python 3.10/3.11 reparse-point fallback
 - 单次输出上限
 - loopback HTTP 保护
+- `WorkspaceError` 经 MCP SDK 转换为 tool error result
 
 ## 为什么没有 Shell
 
