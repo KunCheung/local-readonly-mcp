@@ -46,8 +46,8 @@ class WorkspaceRegistry:
             config.get("max_output_chars", DEFAULT_MAX_OUTPUT_CHARS)
         )
         global_deny_patterns = tuple(config.get("deny_patterns", ()))
-        global_allow_patterns = tuple(
-            config.get("allow_patterns", DEFAULT_ALLOW_PATTERNS)
+        global_allow_patterns = (
+            DEFAULT_ALLOW_PATTERNS + tuple(config.get("allow_patterns", ()))
         )
         global_allow_sensitive = bool(config.get("allow_sensitive_files", False))
 
@@ -74,11 +74,11 @@ class WorkspaceRegistry:
                 output_limit = int(
                     value.get("max_output_chars", global_output_limit)
                 )
-                deny_patterns = tuple(
-                    value.get("deny_patterns", global_deny_patterns)
+                deny_patterns = global_deny_patterns + tuple(
+                    value.get("deny_patterns", ())
                 )
-                allow_patterns = tuple(
-                    value.get("allow_patterns", global_allow_patterns)
+                allow_patterns = global_allow_patterns + tuple(
+                    value.get("allow_patterns", ())
                 )
                 allow_sensitive = bool(
                     value.get("allow_sensitive_files", global_allow_sensitive)
