@@ -1,0 +1,19 @@
+{
+  "default_root": "tmp",
+  "max_read_bytes": 2097152,
+  "max_search_file_bytes": 10485760,
+  "max_output_chars": 262144,
+  "allow_sensitive_files": false,
+  "deny_patterns": [],
+  "allow_patterns": [
+    ".env.example",
+    "**/.env.example",
+    ".env.sample",
+    "**/.env.sample",
+    ".env.template",
+    "**/.env.template"
+  ],
+  "roots": {
+    "tmp": "D:/tmp"
+  }
+}
